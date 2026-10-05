@@ -1,8 +1,16 @@
 import { defineConfig } from 'vite';
+import { tanstackStart } from '@tanstack/react-start/plugin/vite';
+import viteReact from '@vitejs/plugin-react';
 
 export default defineConfig({
-  base: './', // (relative: the site also works under a path, as on GitHub Pages)
-  server: { port: 5280 },
-  build: { target: 'es2022' },
-  worker: { format: 'es' },
+  plugins: [
+    tanstackStart(),
+    viteReact(),
+  ],
+  server: {
+    port: 5280,
+  },
+  worker: {
+    format: 'es',
+  },
 });
