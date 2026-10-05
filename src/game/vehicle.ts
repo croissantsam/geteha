@@ -438,19 +438,23 @@ export class VehicleController {
     }
 
     // --- STEERING DYNAMICS ---
-    // Snappy, arcade-responsive steering
+    // Burnout-style: sharp turn-in, weighty at speed. Bite comes from a
+    // fast wheel take-up; stability from the yaw-rate caps below — never
+    // from numbing the steering (that numbness = toy feeling).
     const speedRatio = Math.min(1.0, currentSpeedKmh / 240);
-    const maxSteerDeg = 36 - speedRatio * 16; // 36° low speed, 20° at 240 km/h
+    const maxSteerDeg = 34 - speedRatio * 14; // 34° parking, 20° at 240 km/h
     const maxSteer = THREE.MathUtils.degToRad(maxSteerDeg);
     this.targetSteer = steerDir * maxSteer;
-    this.steerAngle = THREE.MathUtils.lerp(this.steerAngle, this.targetSteer, dt * 18);
+    // Quick take-up, slightly calmer at very high speed.
+    const steerSpeed = 13 - speedRatio * 5; // 13/s slow, 8/s fast
+    this.steerAngle = THREE.MathUtils.lerp(this.steerAngle, this.targetSteer, Math.min(1, dt * steerSpeed));
 
     // --- DYNAMICS & FORCES ---
     // Top speed & acceleration curves
     const chainBonus = Math.min(30, this.burnoutChainCount * 8);
     const maxForwardSpeed = this.isBoosting ? (340 + chainBonus) : 260; // km/h
     const maxForwardSpeedMs = maxForwardSpeed / 3.6;
-    const baseAccel = this.isBoosting ? 22.5 : 11.2; // m/s^2 (0-100 km/h in 2.2s normal, 1.8s boost)
+    const baseAccel = this.isBoosting ? 26 : 13.0; // m/s^2: brutal launch, violent boost
 
     let accelFwd = 0;
     if (this.throttle > 0) {
@@ -486,8 +490,9 @@ export class VehicleController {
       const wheelBase = 2.8;
       let turnRate = (vLong / wheelBase) * Math.tan(this.steerAngle);
 
-      // Burnout Oversteer: car tail steps out into drift
-      const oversteerAmount = this.driftDirection * (1.6 + this.driftFactor * 1.8) * Math.sign(vLong || 1);
+      // Burnout Oversteer: tail steps out with authority but caps out —
+      // the slide has character without ever spinning like a top.
+      const oversteerAmount = this.driftDirection * (0.85 + this.driftFactor * 1.1) * Math.sign(vLong || 1);
       turnRate += oversteerAmount;
 
       // Counter-steering control:
@@ -498,10 +503,14 @@ export class VehicleController {
         turnRate += this.driftDirection * 1.2;
       }
 
+      // Clamp: Burnout caps yaw rate so the car stays catchable.
+      turnRate = THREE.MathUtils.clamp(turnRate, -2.6, 2.6);
+
       this.yaw += turnRate * dt;
 
-      // Lateral Grip in drift: low grip lets car slide sideways
-      const driftGripCoeff = 3.4; // m/s^2 per m/s slip
+      // Lateral Grip in drift: low enough to slide, high enough to catch.
+      // Old 3.4 let the slide run away; 4.2 keeps the Burnout powerslide arc.
+      const driftGripCoeff = 4.2; // m/s^2 per m/s slip
       const accelLat = -vLat * driftGripCoeff;
 
       // Update horizontal velocity
@@ -520,9 +529,9 @@ export class VehicleController {
         THREE.MathUtils.degToRad(42)
       );
 
-      // Check for drift exit
+      // Check for drift exit (forgiving: release steer or catch the slide)
       const isStraightening = (steerDir === -this.driftDirection || steerDir === 0);
-      const isAligned = Math.abs(currentVLat) < 1.6;
+      const isAligned = Math.abs(currentVLat) < 2.4;
       if ((isStraightening && isAligned) || currentSpeedKmh < 20) {
         this.isDrifting = false;
         // Grip-Snap Forward Boost on clean exit!
@@ -539,13 +548,17 @@ export class VehicleController {
       this.driftAngle = THREE.MathUtils.lerp(this.driftAngle, 0, dt * 8);
       this.visualSteer = this.steerAngle;
 
-      // Normal turn rate
+      // Normal turn rate, capped like Burnout: heavy car, no snap-spin.
+      // Raw bicycle (v/L)*tan(delta) explodes at speed (7+ rad/s), hence the spins.
       const wheelBase = 2.8;
-      const turnRate = (vLong / wheelBase) * Math.tan(this.steerAngle);
+      const rawTurn = (vLong / wheelBase) * Math.tan(this.steerAngle);
+      const maxYaw = 1.9 - speedRatio * 0.7; // ~1.9 rad/s slow, ~1.2 fast
+      const turnRate = THREE.MathUtils.clamp(rawTurn, -maxYaw, maxYaw);
       this.yaw += turnRate * dt;
 
-      // Tight lateral grip (no unwanted slide)
-      const normalGripCoeff = 18.0;
+      // Planted but alive: grips hard, yet lets the rear breathe so you
+      // feel mass transfer instead of slot-car glue (old 18 = toy rail).
+      const normalGripCoeff = 12.0;
       const accelLat = -vLat * normalGripCoeff;
 
       // Update horizontal velocity
@@ -573,8 +586,12 @@ export class VehicleController {
     this.speedMs = updatedVLong;
     this.speed = this.speedMs * 3.6;
 
-    // Lateral G acceleration for chassis roll and camera
-    this.lateralG = (vLong * (this.steerAngle / 2.8)) + (this.isDrifting ? -this.driftDirection * 1.5 : 0);
+    // Lateral acceleration in real Gs for chassis lean + HUD.
+    // Old version omitted /9.81, so it saturated permanently (~7 "G" in corners).
+    const yawRateEst = Math.abs(this.steerAngle) > 0.001
+      ? THREE.MathUtils.clamp((vLong / 2.8) * Math.tan(this.steerAngle), -2.0, 2.0)
+      : 0;
+    this.lateralG = (vLong * yawRateEst) / 9.81 + (this.isDrifting ? -this.driftDirection * 0.6 : 0);
 
     // 5. Update Position
     this.position.x += this.velocity.x * dt;

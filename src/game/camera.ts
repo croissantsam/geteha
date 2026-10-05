@@ -56,6 +56,11 @@ export class CameraController {
   targetFov: number;
   shakeTrauma: number;
   snapped: boolean;
+  // Burnout-style stabilised chase heading: the camera boom follows a
+  // lagged yaw instead of the car's instant yaw, so slides and twitches
+  // don't whip the view around (main motion-sickness source).
+  smoothYaw: number;
+  smoothYawInit: boolean;
 
   constructor(camera: THREE.PerspectiveCamera, vehicle: any, domElement: HTMLElement) {
     this.camera = camera;
@@ -92,6 +97,8 @@ export class CameraController {
     // placed on the car once (spawn) instead of flying in from the origin
     // (which crosses buildings/ground = black flashes when starting to drive).
     this.snapped = false;
+    this.smoothYaw = 0;
+    this.smoothYawInit = false;
 
     this.setupControls();
   }
@@ -291,33 +298,43 @@ export class CameraController {
     const mode = this.mode;
 
     if (mode === CAMERA_MODES.CHASE) {
-      // Burnout Paradise Cinematic Action Chase
-      // Distance stretches back at speed and boost: 6.2m -> 10.5m
-      const followDist = 6.2 + speedRatio * 3.4 + (this.vehicle.isBoosting ? 1.2 : 0);
-      const followHeight = 2.1 + speedRatio * 0.65;
+      // Burnout Paradise chase: LOW and CLOSE behind the car, locked horizon.
+      // The boom sits behind the *smoothed* heading (lagged yaw), while the
+      // look target uses the car's real heading far ahead. Result: the car
+      // can slide/steer underneath without whipping the view around.
+      // Low + close = sense of mass and speed; the old high/far framing
+      // shrank the car and killed both (toy feeling).
+      const camYaw = this.smoothYawInit ? this.smoothYaw : yaw;
+      const camFwdX = Math.sin(camYaw);
+      const camFwdZ = Math.cos(camYaw);
+      const camRightX = Math.cos(camYaw);
+      const camRightZ = -Math.sin(camYaw);
+      // Tight Burnout framing: bumper-near, drops with speed under boost.
+      const followDist = 5.4 + speedRatio * 1.4 + (this.vehicle.isBoosting ? 0.6 : 0);
+      const followHeight = 1.9 + speedRatio * 0.3;
 
-      // Dynamic Drift Framing:
-      // When sliding sideways, camera swings out to frame the slide and road ahead
+      // Readable slide framing: follows the drift a touch so the car
+      // stays in frame, without swinging side to side.
       let driftOffset = 0;
       if (this.vehicle.isDrifting) {
-        driftOffset = -this.vehicle.driftDirection * (this.vehicle.driftFactor * 2.2);
+        driftOffset = -this.vehicle.driftDirection * (this.vehicle.driftFactor * 1.2);
       }
 
-      // Slight steer look-ahead
-      const steerLook = -this.vehicle.steerAngle * 2.2;
+      // Light steer look-ahead: road presence without sway.
+      const steerLook = -this.vehicle.steerAngle * 1.2;
 
       outPos.set(
-        carPos.x - forwardX * followDist + rightX * driftOffset,
+        carPos.x - camFwdX * followDist + camRightX * driftOffset,
         carPos.y + followHeight,
-        carPos.z - forwardZ * followDist + rightZ * driftOffset
+        carPos.z - camFwdZ * followDist + camRightZ * driftOffset
       );
 
-      const lookAheadDist = 9 + speedRatio * 15;
-      const driftLookBonus = this.vehicle.isDrifting ? this.vehicle.driftDirection * 3.5 : 0;
+      const lookAheadDist = 9 + speedRatio * 14;
+      const driftLookBonus = this.vehicle.isDrifting ? this.vehicle.driftDirection * 2.0 : 0;
 
       outLook.set(
         carPos.x + forwardX * lookAheadDist + rightX * (steerLook + driftLookBonus),
-        carPos.y + 1.15,
+        carPos.y + 1.0,
         carPos.z + forwardZ * lookAheadDist + rightZ * (steerLook + driftLookBonus)
       );
     } else if (mode === CAMERA_MODES.HOOD) {
@@ -363,15 +380,33 @@ export class CameraController {
     const speed = Math.abs(this.vehicle.speed);
     const speedRatio = Math.min(1.0, speed / 260);
 
-    // Dynamic FOV scaling: dramatic speed tunnel warp (55° up to 84° under Nitro Boost).
-    // Only rebuild the projection matrix past a threshold: every rebuild also
-    // resyncs the depth-dependent post-processing passes (AO, reflections).
-    const boostFov = this.vehicle.isBoosting ? 14 : 0;
-    const chainFov = Math.min(6, (this.vehicle.burnoutChainCount || 0) * 2);
-    const extraFov = (speedRatio * 15) + boostFov + chainFov;
+    // Burnout-style yaw stabilisation: the chase boom follows a lagged
+    // heading — tight enough to feel connected, loose enough that slides
+    // and twitches don't whip the view (motion-sickness source).
+    const yaw = this.vehicle.yaw ?? 0;
+    if (!this.smoothYawInit) {
+      this.smoothYaw = yaw;
+      this.smoothYawInit = true;
+    } else if (this.mode === CAMERA_MODES.CHASE && dt > 0) {
+      let diff = yaw - this.smoothYaw;
+      while (diff > Math.PI) diff -= Math.PI * 2;
+      while (diff < -Math.PI) diff += Math.PI * 2;
+      const baseRate = this.vehicle.isDrifting ? 5.2 : 4.5 - speedRatio * 1.0;
+      const k = 1.0 - Math.exp(-dt * Math.max(2.0, baseRate));
+      this.smoothYaw += diff * k;
+    } else if (this.mode !== CAMERA_MODES.CHASE) {
+      this.smoothYaw = yaw;
+    }
+
+    // Speed FOV with punch: stable cruise lens, progressive kick with
+    // speed and a firm boost surge. Fast enough to feel, slow enough
+    // to never snap (snap = nausea).
+    const boostFov = this.vehicle.isBoosting ? 10 : 0;
+    const chainFov = Math.min(4, (this.vehicle.burnoutChainCount || 0) * 1.5);
+    const extraFov = (speedRatio * 10) + boostFov + chainFov;
     this.targetFov = this.baseFov + extraFov;
     if (Math.abs(this.camera.fov - this.targetFov) > 0.02) {
-      this.camera.fov = THREE.MathUtils.lerp(this.camera.fov, this.targetFov, Math.min(1, dt * 8));
+      this.camera.fov = THREE.MathUtils.lerp(this.camera.fov, this.targetFov, Math.min(1, dt * 4.5));
       this.camera.updateProjectionMatrix();
     }
 
@@ -385,11 +420,14 @@ export class CameraController {
         // lerping from the world origin through buildings.
         this.currentCameraPos.copy(_idealPos);
         this.currentLookAt.copy(_idealLook);
+        this.smoothYaw = this.vehicle.yaw ?? 0;
+        this.smoothYawInit = true;
         this.snapped = true;
       } else {
-        // Smooth lag damping
-        const posLerp = 1.0 - Math.exp(-dt * (9.0 + speedRatio * 7.0));
-        const lookLerp = 1.0 - Math.exp(-dt * 14.0);
+        // Tight Burnout leash: follows hard with a short lag so the car
+        // feels bolted to the road, not floating on a string.
+        const posLerp = 1.0 - Math.exp(-dt * (6.5 + speedRatio * 2.5));
+        const lookLerp = 1.0 - Math.exp(-dt * 7.0);
 
         this.currentCameraPos.lerp(_idealPos, posLerp);
         this.currentLookAt.lerp(_idealLook, lookLerp);
@@ -401,11 +439,7 @@ export class CameraController {
       this.camera.position.copy(this.currentCameraPos);
       this.camera.lookAt(this.currentLookAt);
       this.updateCarVisibility();
-
-      // Subtle dynamic horizon roll / Dutch angle into corners
-      const lateralG = this.vehicle.lateralG || 0;
-      const targetRoll = THREE.MathUtils.clamp(-lateralG * 0.035, -0.065, 0.065);
-      this.camera.rotation.z += targetRoll;
+      // Horizon stays locked (no Dutch roll): Burnout-style stability.
 
     } else if (mode === CAMERA_MODES.HOOD) {
       this.clampAboveGround(_idealPos, 0.5);
@@ -426,9 +460,10 @@ export class CameraController {
       this.camera.lookAt(_idealLook);
     }
 
-    // High speed engine & wind vibration (Burnout Paradise thrill)
-    if (speed > 210 || this.vehicle.isBoosting) {
-      const vib = this.vehicle.isBoosting ? 0.045 : (speed - 210) / 100 * 0.03;
+    // Faint boost tremor only (Burnout thrill without the judder).
+    // The old constant high-speed random jitter shook the horizon nonstop.
+    if (this.vehicle.isBoosting) {
+      const vib = 0.015;
       this.camera.position.x += (Math.random() * 2 - 1) * vib;
       this.camera.position.y += (Math.random() * 2 - 1) * vib * 0.6;
       this.camera.position.z += (Math.random() * 2 - 1) * vib;

@@ -455,25 +455,27 @@ export class CarModel {
     }
 
     // 3. Dynamic Suspension & Weight Transfer on Chassis
-    // Lateral roll: body leans outwards when cornering or sliding
+    // Visible muscle: the body leans, squats and dives so you feel 1.5t
+    // shifting around. The CAMERA stays locked (no horizon roll) — the
+    // weight reads on the car, not in your inner ear.
     const speedRatio = Math.min(1.0, Math.abs(speed) / 130);
     const lateralG = carState.lateralG !== undefined ? carState.lateralG : (-steerAngle * speedRatio * 1.5);
-    const targetRoll = THREE.MathUtils.clamp(-lateralG * 0.10, -0.12, 0.12);
+    const targetRoll = THREE.MathUtils.clamp(-lateralG * 0.085, -0.09, 0.09);
 
     // Longitudinal pitch: rear squats under acceleration/nitro, nose dives under heavy braking
     let targetPitch = 0;
     if (isBoosting) {
-      targetPitch = -0.055; // Aggressive squat when firing nitro
+      targetPitch = -0.07; // Violent squat when firing nitro
     } else if (throttle > 0.1) {
-      targetPitch = -0.032 * Math.min(1.0, throttle);
+      targetPitch = -0.04 * Math.min(1.0, throttle);
     }
     if (isBraking) {
-      targetPitch = 0.058; // Nose dive on brake
+      targetPitch = 0.07; // Nose dive on brake
     }
 
-    // Dampen chassis angles smoothly
-    this.chassis.rotation.z = THREE.MathUtils.lerp(this.chassis.rotation.z, targetRoll, dt * 14);
-    this.chassis.rotation.x = THREE.MathUtils.lerp(this.chassis.rotation.x, targetPitch, dt * 12);
+    // Firm damping: weight moves fast enough to feel, never wobbles.
+    this.chassis.rotation.z = THREE.MathUtils.lerp(this.chassis.rotation.z, targetRoll, Math.min(1, dt * 9));
+    this.chassis.rotation.x = THREE.MathUtils.lerp(this.chassis.rotation.x, targetPitch, Math.min(1, dt * 8));
 
     // Dynamic Underglow intensity pulse during boost
     if (isBoosting && this.underglowMesh.visible) {
